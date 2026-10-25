@@ -1,6 +1,7 @@
 import express, { type Express } from 'express';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { authRouter } from './modules/auth/routes.js';
+import { categoriesRouter } from './modules/categories/routes.js';
 
 export const app: Express = express();
 
@@ -13,6 +14,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use(authRouter);
+app.use(categoriesRouter);
 
 // 404 handler for unknown routes
 app.use(notFoundHandler);
