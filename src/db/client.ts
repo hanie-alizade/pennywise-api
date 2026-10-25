@@ -22,5 +22,9 @@ if (process.env.NODE_ENV !== 'production') {
   globalForDb.pool = pool;
 }
 
-export const db = drizzle(pool, { schema });
+export let db = drizzle(pool, { schema });
 export type Database = typeof db;
+
+export function setTestDb(testDb: unknown) {
+  db = testDb as Database;
+}
