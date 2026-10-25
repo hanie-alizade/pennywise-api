@@ -1,0 +1,781 @@
+openapi: 3.0.3
+info:
+  title: Pennywise API
+  version: 0.1.0
+  description: |
+    REST API for Pennywise (personal budgeting).
+
+    Conventions
+    - Money is an INTEGER in minor units (e.g. sen). 1250 = 12.50 MYR. Never floats.
+    - Dates are calendar dates `YYYY-MM-DD` (no timezone). The client sends the user's LOCAL date.
+      The server never guesses "today".
+    - Timestamps (`createdAt`, etc.) are ISO-8601 UTC.
+    - `actual` is `null` when a line has no transactions ("unset"), which is different from 0.
+    - `difference`: for expense = expected - actual (positive = remaining/under budget, negative = overspent);
+      for income = actual - expected (positive = earned more than planned). Null is treated as 0 in totals.
+    - Data is scoped to the caller's workspace, derived from the access token. Never send a user or workspace id.
+    - Resources of another workspace return 404 (not 403).
+servers:
+  - url: http://localhost:3000
+    description: Local
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Categories
+  - name: Months
+  - name: Budget lines
+  - name: Transactions
+paths:
+  /health:
+    get:
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, example: ok }
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Create account (also creates a personal workspace)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Credentials' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Credentials' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Exchange a refresh token for new tokens (refresh token rotates)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tokens' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the given refresh token (this device only)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '204': { description: Signed out }
+
+  /me:
+    get:
+      tags: [Auth]
+      summary: Current user and workspace
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /categories:
+    get:
+      tags: [Categories]
+      summary: List categories with subcategories
+      parameters:
+        - name: includeArchived
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [categories]
+                properties:
+                  categories:
+                    type: array
+                    items: { $ref: '#/components/schemas/Category' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Categories]
+      summary: Create a category
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Category' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /categories/{id}:
+    patch:
+      tags: [Categories]
+      summary: Rename, reorder, or archive/unarchive a category
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Category' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /categories/{id}/subcategories:
+    post:
+      tags: [Categories]
+      summary: Add a subcategory
+      description: |
+        Fails with 409 `CATEGORY_HAS_DATA` if this would be the category's first subcategory and the category
+        already has an expected amount or transactions on its own line (in any month).
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubcategoryCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subcategory' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /subcategories/{id}:
+    patch:
+      tags: [Categories]
+      summary: Rename, reorder, or archive/unarchive a subcategory
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subcategory' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /months:
+    get:
+      tags: [Months]
+      summary: List existing months (newest first)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [months]
+                properties:
+                  months:
+                    type: array
+                    items: { $ref: '#/components/schemas/MonthRef' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Months]
+      summary: Create a month, optionally copying Expected values from another month
+      description: |
+        Atomic. With `copyFrom`, only expected amounts are copied (never transactions) and only for active
+        categories/subcategories. The source month is not modified.
+        Without `copyFrom`, one line per active category/subcategory is created with expected = null.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MonthCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MonthView' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /months/{year}/{month}:
+    get:
+      tags: [Months]
+      summary: Full month view with computed totals
+      parameters:
+        - { $ref: '#/components/parameters/Year' }
+        - { $ref: '#/components/parameters/Month' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MonthView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /months/{year}/{month}/lines:
+    post:
+      tags: [Months]
+      summary: Add a category or subcategory to an existing month
+      description: |
+        Provide `categoryId` for a category without subcategories, or `subcategoryId` for a subcategory.
+        A category that has subcategories cannot get its own line (422).
+      parameters:
+        - { $ref: '#/components/parameters/Year' }
+        - { $ref: '#/components/parameters/Month' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LineCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MonthView' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /budget-lines/{id}:
+    patch:
+      tags: [Budget lines]
+      summary: Set or clear the Expected amount of a line
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected]
+              properties:
+                expected:
+                  $ref: '#/components/schemas/NullableMoney'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LineRow' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      tags: [Budget lines]
+      summary: Remove an empty line from a month
+      description: Fails with 409 `LINE_HAS_TRANSACTIONS` if the line has transactions.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /budget-lines/{id}/transactions:
+    get:
+      tags: [Transactions]
+      summary: List transactions of a line (newest date first)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [transactions, total]
+                properties:
+                  total:
+                    type: integer
+                    description: Sum of amounts (minor units)
+                  transactions:
+                    type: array
+                    items: { $ref: '#/components/schemas/Transaction' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Transactions]
+      summary: Add a transaction (income received or expense spent)
+      description: |
+        `date` is required and must fall in the same year+month as the line's month,
+        otherwise 422 `TRANSACTION_DATE_OUTSIDE_MONTH`. Only leaf lines accept transactions.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransactionCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /transactions/{id}:
+    patch:
+      tags: [Transactions]
+      summary: Edit amount and/or date (same-month rule applies)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransactionUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      tags: [Transactions]
+      summary: Delete a transaction
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Year:
+      name: year
+      in: path
+      required: true
+      schema: { type: integer, minimum: 2000, maximum: 2100 }
+    Month:
+      name: month
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1, maximum: 12 }
+
+  responses:
+    ValidationError:
+      description: Invalid input (400, code VALIDATION_ERROR)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing, invalid, or expired token (401, code UNAUTHORIZED)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Not found, or belongs to another workspace (404, code NOT_FOUND)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: |
+        Conflict (409). Codes include EMAIL_TAKEN, MONTH_EXISTS, CATEGORY_HAS_DATA, LINE_EXISTS,
+        LINE_HAS_TRANSACTIONS, NAME_TAKEN.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unprocessable:
+      description: |
+        Valid shape but breaks a business rule (422). Codes include TRANSACTION_DATE_OUTSIDE_MONTH,
+        CATEGORY_HAS_SUBCATEGORIES, NOT_A_LEAF_LINE, SUBCATEGORY_CATEGORY_MISMATCH.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: Too many attempts (429, code RATE_LIMITED)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  path: { type: string, example: amount }
+                  message: { type: string }
+
+    Money:
+      type: integer
+      minimum: 0
+      description: Minor units (sen). 1250 = 12.50.
+      example: 1250
+    NullableMoney:
+      type: integer
+      nullable: true
+      minimum: 0
+      description: Minor units, or null for "not set".
+
+    LocalDate:
+      type: string
+      pattern: '^\d{4}-\d{2}-\d{2}$'
+      description: Calendar date in the user's local calendar.
+      example: '2026-09-28'
+
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 10, maxLength: 200 }
+
+    Tokens:
+      type: object
+      required: [accessToken, refreshToken, expiresIn]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        expiresIn:
+          type: integer
+          description: Access token lifetime in seconds.
+
+    User:
+      type: object
+      required: [id, email]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+
+    Workspace:
+      type: object
+      required: [id, name, currency, role]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        currency:
+          type: string
+          example: MYR
+          description: ISO 4217 code. Use Intl.NumberFormat on the client; decimals differ per currency.
+        role: { type: string, enum: [owner, member] }
+
+    AuthResponse:
+      allOf:
+        - $ref: '#/components/schemas/Tokens'
+        - type: object
+          required: [user]
+          properties:
+            user: { $ref: '#/components/schemas/User' }
+
+    Me:
+      type: object
+      required: [user, workspace]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        workspace: { $ref: '#/components/schemas/Workspace' }
+
+    CategoryType:
+      type: string
+      enum: [income, expense]
+
+    Subcategory:
+      type: object
+      required: [id, categoryId, name, sortOrder, archivedAt]
+      properties:
+        id: { type: string, format: uuid }
+        categoryId: { type: string, format: uuid }
+        name: { type: string }
+        sortOrder: { type: integer }
+        archivedAt: { type: string, format: date-time, nullable: true }
+
+    Category:
+      type: object
+      required: [id, name, type, sortOrder, archivedAt, subcategories]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        type: { $ref: '#/components/schemas/CategoryType' }
+        sortOrder: { type: integer }
+        archivedAt: { type: string, format: date-time, nullable: true }
+        subcategories:
+          type: array
+          items: { $ref: '#/components/schemas/Subcategory' }
+
+    CategoryCreate:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 60 }
+        type: { $ref: '#/components/schemas/CategoryType' }
+        sortOrder: { type: integer }
+        addToMonth:
+          $ref: '#/components/schemas/YearMonth'
+
+    SubcategoryCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 60 }
+        sortOrder: { type: integer }
+        addToMonth:
+          $ref: '#/components/schemas/YearMonth'
+
+    CategoryUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 60 }
+        sortOrder: { type: integer }
+        archived: { type: boolean, description: true = archive, false = unarchive }
+
+    YearMonth:
+      type: object
+      required: [year, month]
+      properties:
+        year: { type: integer, minimum: 2000, maximum: 2100 }
+        month: { type: integer, minimum: 1, maximum: 12 }
+
+    MonthRef:
+      type: object
+      required: [id, year, month]
+      properties:
+        id: { type: string, format: uuid }
+        year: { type: integer }
+        month: { type: integer }
+
+    MonthCreate:
+      type: object
+      required: [year, month]
+      properties:
+        year: { type: integer, minimum: 2000, maximum: 2100 }
+        month: { type: integer, minimum: 1, maximum: 12 }
+        copyFrom:
+          $ref: '#/components/schemas/YearMonth'
+
+    LineCreate:
+      type: object
+      description: Exactly one of categoryId / subcategoryId.
+      properties:
+        categoryId: { type: string, format: uuid }
+        subcategoryId: { type: string, format: uuid }
+        expected: { $ref: '#/components/schemas/NullableMoney' }
+
+    LineRow:
+      type: object
+      description: A leaf line (the only place Expected and transactions live).
+      required: [lineId, name, archived, expected, actual, transactionCount]
+      properties:
+        lineId: { type: string, format: uuid }
+        subcategoryId: { type: string, format: uuid, nullable: true }
+        name: { type: string }
+        archived: { type: boolean }
+        expected: { $ref: '#/components/schemas/NullableMoney' }
+        actual:
+          $ref: '#/components/schemas/NullableMoney'
+        transactionCount: { type: integer }
+
+    CategoryRow:
+      type: object
+      required: [categoryId, name, archived, hasSubcategories, expected, actual, expectedIsComputed, lineId, children]
+      properties:
+        categoryId: { type: string, format: uuid }
+        name: { type: string }
+        archived: { type: boolean }
+        hasSubcategories:
+          type: boolean
+          description: If true, expected/actual are computed from children (read-only) and lineId is null.
+        expectedIsComputed: { type: boolean }
+        lineId:
+          type: string
+          format: uuid
+          nullable: true
+          description: The category's own leaf line, only when hasSubcategories is false.
+        expected: { $ref: '#/components/schemas/NullableMoney' }
+        actual: { $ref: '#/components/schemas/NullableMoney' }
+        transactionCount:
+          type: integer
+          description: Only meaningful when hasSubcategories is false.
+        children:
+          type: array
+          description: Subcategory lines in this month (empty when hasSubcategories is false).
+          items: { $ref: '#/components/schemas/LineRow' }
+
+    Totals:
+      type: object
+      required: [expected, actual, difference, hasAnyActual]
+      properties:
+        expected: { $ref: '#/components/schemas/Money' }
+        actual: { $ref: '#/components/schemas/Money' }
+        difference:
+          type: integer
+          description: Expense = expected - actual. Income = actual - expected. May be negative.
+        hasAnyActual:
+          type: boolean
+          description: False if no line in this section has any transaction yet.
+
+    Section:
+      type: object
+      required: [totals, categories]
+      properties:
+        totals: { $ref: '#/components/schemas/Totals' }
+        categories:
+          type: array
+          items: { $ref: '#/components/schemas/CategoryRow' }
+
+    MonthView:
+      type: object
+      required: [id, year, month, currency, income, expense, net]
+      properties:
+        id: { type: string, format: uuid }
+        year: { type: integer }
+        month: { type: integer }
+        currency: { type: string, example: MYR }
+        income: { $ref: '#/components/schemas/Section' }
+        expense: { $ref: '#/components/schemas/Section' }
+        net:
+          type: object
+          required: [expected, actual]
+          description: income minus expense. May be negative.
+          properties:
+            expected: { type: integer }
+            actual: { type: integer }
+
+    Transaction:
+      type: object
+      required: [id, budgetLineId, amount, date, createdBy, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        budgetLineId: { type: string, format: uuid }
+        amount: { type: integer, minimum: 1 }
+        date: { $ref: '#/components/schemas/LocalDate' }
+        createdBy: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    TransactionCreate:
+      type: object
+      required: [amount, date]
+      properties:
+        amount: { type: integer, minimum: 1 }
+        date: { $ref: '#/components/schemas/LocalDate' }
+
+    TransactionUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        amount: { type: integer, minimum: 1 }
+        date: { $ref: '#/components/schemas/LocalDate' }
