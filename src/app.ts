@@ -7,6 +7,9 @@ import { transactionsRouter } from './modules/transactions/routes.js';
 
 export const app: Express = express();
 
+// Trust the first proxy hop because Vercel overwrites X-Forwarded-For with the real client IP
+app.set('trust proxy', 1);
+
 // Standard middlewares
 app.use(express.json());
 

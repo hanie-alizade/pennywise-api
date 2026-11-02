@@ -129,7 +129,7 @@ Run migrations against the production database using the direct connection strin
 
 ```powershell
 $env:DIRECT_DATABASE_URL="postgresql://user:password@ep-sample.region.neon.tech/neondb?sslmode=require"
-pnpm drizzle-kit migrate
+pnpm db:migrate
 ```
 
 ### Step 3: Deploy to Vercel
