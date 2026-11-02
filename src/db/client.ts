@@ -16,7 +16,7 @@ const globalForDb = globalThis as unknown as {
 
 const connectionString = env.DATABASE_URL || 'postgres://localhost:5432/pennywise_dev';
 
-export const pool = globalForDb.pool ?? new Pool({ connectionString });
+export const pool = globalForDb.pool ?? new Pool({ connectionString, max: 2 });
 
 if (process.env.NODE_ENV !== 'production') {
   globalForDb.pool = pool;
