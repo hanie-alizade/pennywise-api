@@ -34,18 +34,18 @@ Create a `.env` file in the project root based on `.env.example`:
 cp .env.example .env
 ```
 
-| Variable                     | Description                                                                              | Example / Default                                                              |
-| ---------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `NODE_ENV`                   | Application environment                                                                  | `development` / `production` / `test`                                          |
-| `PORT`                       | Local dev server listening port                                                          | `3000`                                                                         |
-| `DATABASE_URL`               | **Pooled** Neon PostgreSQL connection string (used at runtime by the app)                | `postgresql://user:pass@ep-...-pooler.region.neon.tech/neondb?sslmode=require` |
-| `DIRECT_DATABASE_URL`        | **Direct (unpooled)** Neon connection string (used by Drizzle Kit for schema migrations) | `postgresql://user:pass@ep-....region.neon.tech/neondb?sslmode=require`        |
-| `JWT_ACCESS_SECRET`          | Secret key for signing access JWTs (min 32 characters)                                   | Secure random 256-bit string                                                   |
-| `JWT_ACCESS_EXPIRES_IN`      | Access token lifetime in seconds                                                         | `900` (15 minutes)                                                             |
-| `REFRESH_TOKEN_EXPIRES_DAYS` | Refresh token lifetime in days                                                           | `30`                                                                           |
+| Variable                     | Description                                                                                                                                                                       | Example / Default                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `NODE_ENV`                   | Application environment                                                                                                                                                           | `development` / `production` / `test`                                                 |
+| `PORT`                       | Local dev server listening port                                                                                                                                                   | `3000`                                                                                |
+| `DATABASE_URL`               | **POOLED connection string (PgBouncer with `-pooler` in hostname)**. Used by the app at runtime for connection pooling across serverless executions.                              | `postgresql://user:password@ep-sample-pooler.region.neon.tech/neondb?sslmode=require` |
+| `DIRECT_DATABASE_URL`        | **DIRECT unpooled connection string (without `-pooler` in hostname)**. Used exclusively by `drizzle-kit` for schema migrations to bypass PgBouncer transaction/lock restrictions. | `postgresql://user:password@ep-sample.region.neon.tech/neondb?sslmode=require`        |
+| `JWT_ACCESS_SECRET`          | Secret key for signing access JWTs (min 32 characters)                                                                                                                            | Secure random 256-bit string                                                          |
+| `JWT_ACCESS_EXPIRES_IN`      | Access token lifetime in seconds                                                                                                                                                  | `900` (15 minutes)                                                                    |
+| `REFRESH_TOKEN_EXPIRES_DAYS` | Refresh token lifetime in days                                                                                                                                                    | `30`                                                                                  |
 
 > [!IMPORTANT]
-> **Neon Connection Strings:** Always use the **pooled** connection string for `DATABASE_URL` during application runtime to reuse connections in serverless environments. Always use the **direct (unpooled)** string for `DIRECT_DATABASE_URL` when applying migrations, because DDL migrations and lock operations bypass PgBouncer.
+> **Neon Connection Strings:** Always configure `DATABASE_URL` with the pooled connection string (`-pooler`) for production runtime on Vercel. Always configure `DIRECT_DATABASE_URL` with the direct (unpooled) connection string for applying Drizzle Kit schema migrations.
 >
 > _Note on Free Tiers:_ Neon free compute and Vercel Hobby plans are subject to provider quotas and terms (e.g. Neon scale-to-zero compute after inactivity and Vercel execution limits). Check current terms before relying on them.
 
@@ -113,61 +113,90 @@ Tests use **Vitest** and **Supertest** against an in-memory WebAssembly PostgreS
 
 ---
 
-## 6. Deployment to Vercel
+## 6. Deployment Guide (Neon & Vercel)
 
-The backend is configured for deployment on **Vercel Functions** using the Express bridge in `api/index.ts` and `vercel.json`.
+### Step 1: Provision Neon Database
 
-### Deployment Steps:
+1. Log in to [Neon](https://console.neon.tech).
+2. Create a new project (e.g., `pennywise-prod`).
+3. Under **Dashboard > Connection Details**:
+   - Copy the **Pooled connection string** (contains `-pooler` in the host). This will be `DATABASE_URL`.
+   - Copy the **Direct connection string** (uncheck "Connection pooling"). This will be `DIRECT_DATABASE_URL`.
 
-1. Push your repository to your private GitHub / Git provider.
-2. In the [Vercel Dashboard](https://vercel.com):
-   - Import the project repository.
-   - Set **Framework Preset** to `Other`.
-   - Set **Root Directory** to `.` (or project root).
-   - Ensure the build command is `pnpm build` and output directory is `dist`.
-3. Configure **Environment Variables** in the Vercel project settings:
+### Step 2: Run Production Migrations
+
+Run migrations against the production database using the direct connection string:
+
+```powershell
+$env:DIRECT_DATABASE_URL="postgresql://user:password@ep-sample.region.neon.tech/neondb?sslmode=require"
+pnpm drizzle-kit migrate
+```
+
+### Step 3: Deploy to Vercel
+
+Vercel automatically detects Express applications with zero configuration when `src/app.ts` provides a default export (`export default app`). No custom `vercel.json` or `api/` directory is needed.
+
+1. Push your repository to your private GitHub repo.
+2. Go to the [Vercel Dashboard](https://vercel.com/new) and import the repository.
+3. Configure the project settings:
+   - **Framework Preset:** `Other` (or auto-detected Express)
+   - **Root Directory:** `.`
+   - **Build Command:** `pnpm build`
+   - **Output Directory:** `dist`
+4. Add the following **Environment Variables** in Vercel:
    - `NODE_ENV`: `production`
-   - `DATABASE_URL`: Your pooled Neon connection string.
-   - `DIRECT_DATABASE_URL`: Your unpooled Neon connection string.
-   - `JWT_ACCESS_SECRET`: A high-entropy secret string (min 32 characters).
+   - `DATABASE_URL`: _[Your Neon POOLED connection string]_
+   - `DIRECT_DATABASE_URL`: _[Your Neon DIRECT connection string]_
+   - `JWT_ACCESS_SECRET`: _[Random 32+ character string]_
    - `JWT_ACCESS_EXPIRES_IN`: `900`
    - `REFRESH_TOKEN_EXPIRES_DAYS`: `30`
-4. Deploy the project. Vercel routes all requests to `api/index.ts` via the rewrite rule in `vercel.json`.
-5. Run migrations against your production Neon database from your local machine or CI pipeline:
-   ```bash
-   pnpm drizzle-kit migrate
-   ```
+5. Click **Deploy**.
 
 ---
 
-## 7. API Specification
+## 7. Smoke Testing Production (PowerShell with `curl.exe`)
+
+Once deployed, run these smoke tests from PowerShell against your deployment URL (replace `https://your-api.vercel.app` with your actual URL):
+
+```powershell
+$API_URL = "https://your-api.vercel.app"
+
+# 1. Health check (should return 200 {"status":"ok"})
+curl.exe -s -i "$API_URL/health"
+
+# 2. Register account (creates user and personal workspace)
+$regResponse = curl.exe -s -X POST "$API_URL/auth/register" `
+  -H "Content-Type: application/json" `
+  -d '{\"email\":\"testuser@example.com\",\"password\":\"StrongPassword123!\"}'
+
+$regResponse
+$TOKEN = ($regResponse | ConvertFrom-Json).accessToken
+
+# 3. Authenticated /me check
+curl.exe -s -H "Authorization: Bearer $TOKEN" "$API_URL/me"
+
+# 4. Create category
+$catResponse = curl.exe -s -X POST "$API_URL/categories" `
+  -H "Authorization: Bearer $TOKEN" `
+  -H "Content-Type: application/json" `
+  -d '{\"name\":\"Groceries\",\"type\":\"expense\"}'
+
+$catResponse
+
+# 5. Create month (e.g. 2026-11)
+$monthResponse = curl.exe -s -X POST "$API_URL/months" `
+  -H "Authorization: Bearer $TOKEN" `
+  -H "Content-Type: application/json" `
+  -d '{\"year\":2026,\"month\":11}'
+
+$monthResponse
+
+# 6. Verify 404 on nonexistent resource / cross-workspace isolation
+curl.exe -s -i -H "Authorization: Bearer $TOKEN" "$API_URL/categories/00000000-0000-0000-0000-000000000000"
+```
+
+---
+
+## 8. API Specification
 
 The REST API contract is specified in [`openapi.yaml`](file:///p:/Projects/pennywise/backend/openapi.yaml). The mobile application generates TypeScript client types directly from this file.
-
-### Key Route Summary:
-
-- **Health Check:** `GET /health`
-- **Auth:**
-  - `POST /auth/register` — Create account & initial workspace
-  - `POST /auth/login` — Sign in & receive rotating tokens
-  - `POST /auth/refresh` — Rotate refresh token
-  - `POST /auth/logout` — Revoke refresh token
-  - `GET /me` — Current user and workspace context
-- **Categories:**
-  - `GET /categories` — List categories with subcategories
-  - `POST /categories` — Create category (with optional `addToMonth`)
-  - `PATCH /categories/:id` — Rename, reorder, or archive category
-  - `POST /categories/:id/subcategories` — Create subcategory
-  - `PATCH /subcategories/:id` — Rename, reorder, or archive subcategory
-- **Months & Lines:**
-  - `GET /months` — List historical months
-  - `POST /months` — Create month (with optional `copyFrom`)
-  - `GET /months/:year/:month` — Full month view with totals
-  - `POST /months/:year/:month/lines` — Add leaf line to month
-  - `PATCH /budget-lines/:id` — Set or clear expected amount
-  - `DELETE /budget-lines/:id` — Remove empty line from month
-- **Transactions:**
-  - `GET /budget-lines/:id/transactions` — List transactions on line
-  - `POST /budget-lines/:id/transactions` — Record income or expense
-  - `PATCH /transactions/:id` — Update amount or calendar date
-  - `DELETE /transactions/:id` — Delete transaction
